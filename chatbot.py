@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.9
 """
 DeepSeek API 命令行 Chatbot (基于 requests, 无 Rust 编译依赖)
 支持多轮对话、流式输出、历史记录保存
