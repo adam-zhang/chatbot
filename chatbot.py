@@ -1,13 +1,16 @@
-#!/usr/bin/env python3.9
+#!/usr/bin/env python3
 """
 DeepSeek API 命令行 Chatbot (基于 requests, 无 Rust 编译依赖)
 支持多轮对话、流式输出、历史记录保存
+支持启动时直接加载历史文件继续对话
+退出时提示是否保存对话
 """
 
 import os
 import sys
 import json
 import argparse
+from datetime import datetime
 from typing import List, Dict
 
 import requests
@@ -30,6 +33,7 @@ class DeepSeekChatbot:
         self.stream = stream
         self.temperature = temperature
         self.timeout = timeout
+        self.system_prompt = system_prompt
         self.messages: List[Dict[str, str]] = [
             {"role": "system", "content": system_prompt}
         ]
@@ -54,16 +58,31 @@ class DeepSeekChatbot:
             self.messages.pop()
             raise e
 
-    def clear_history(self, system_prompt: str = "You are a helpful assistant."):
-        self.messages = [{"role": "system", "content": system_prompt}]
+    def clear_history(self, system_prompt: str = None):
+        prompt = system_prompt if system_prompt is not None else self.system_prompt
+        self.messages = [{"role": "system", "content": prompt}]
 
     def save_history(self, path: str):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.messages, f, ensure_ascii=False, indent=2)
 
     def load_history(self, path: str):
+        """加载历史文件。校验基本结构，避免脏数据导致后续请求出错。"""
         with open(path, "r", encoding="utf-8") as f:
-            self.messages = json.load(f)
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            raise ValueError("历史文件格式错误：顶层应为消息列表")
+
+        for i, m in enumerate(data):
+            if not isinstance(m, dict) or "role" not in m or "content" not in m:
+                raise ValueError(f"历史文件格式错误：第 {i} 条消息缺少 role/content")
+
+        # 若文件里没有 system 消息，补一条，保证模型有基础指令
+        if not data or data[0].get("role") != "system":
+            data = [{"role": "system", "content": self.system_prompt}] + data
+
+        self.messages = data
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -164,12 +183,81 @@ HELP_TEXT = """
   /save <file>   保存对话历史到文件
   /load <file>   从文件加载对话历史
   /history       显示当前对话历史条数
-  /exit 或 /quit 退出
+  /exit 或 /quit 退出（会提示是否保存）
 """
 
 
 def print_help():
     print(HELP_TEXT)
+
+
+def ask_save_on_exit(bot: DeepSeekChatbot, default_path: str = None) -> bool:
+    """
+    退出前询问是否保存。
+    返回 True 表示可以退出，False 表示用户取消退出、继续对话。
+    """
+    # 只有实际聊过天才询问（历史里不止 system 一条）
+    if len(bot.messages) <= 1:
+        print("再见！")
+        return True
+
+    default_path = default_path or "chat_history_{}.json".format(
+        datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
+
+    print("\n是否保存本次对话？")
+    print(f"  [y] 保存   (默认路径: {default_path})")
+    print("  [p] 保存到指定路径")
+    print("  [n] 不保存，直接退出")
+    print("  [c] 取消退出，继续对话")
+
+    while True:
+        try:
+            choice = input("请选择 [y/p/n/c]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n再见！")
+            return True
+
+        if choice in ("", "y", "yes"):
+            try:
+                bot.save_history(default_path)
+                print(f"已保存到 {default_path}")
+            except Exception as e:
+                print(f"保存失败: {e}", file=sys.stderr)
+                try:
+                    again = input("保存失败，仍要退出吗？[y/N]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    again = "y"
+                if again not in ("y", "yes"):
+                    return False
+            return True
+
+        elif choice in ("p", "path"):
+            try:
+                path = input("请输入保存路径: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                path = ""
+            if not path:
+                print("路径为空，已取消保存。")
+                continue
+            try:
+                bot.save_history(path)
+                print(f"已保存到 {path}")
+                return True
+            except Exception as e:
+                print(f"保存失败: {e}", file=sys.stderr)
+                continue
+
+        elif choice in ("n", "no"):
+            print("已放弃保存，再见！")
+            return True
+
+        elif choice in ("c", "cancel"):
+            print("已取消退出，继续对话。\n")
+            return False
+
+        else:
+            print("无效输入，请输入 y / p / n / c。")
 
 
 def main():
@@ -201,9 +289,14 @@ def main():
         "--no-stream", action="store_true", help="禁用流式输出"
     )
     parser.add_argument(
+        "--load",
+        default=None,
+        help="启动时加载历史文件继续对话",
+    )
+    parser.add_argument(
         "--save-log",
         default=None,
-        help="退出时自动保存对话到指定文件",
+        help="退出时自动保存到指定文件（跳过询问）",
     )
     args = parser.parse_args()
 
@@ -225,6 +318,17 @@ def main():
         timeout=args.timeout,
     )
 
+    # ---- 启动时加载历史 ----
+    if args.load:
+        try:
+            bot.load_history(args.load)
+            print(f"已从 {args.load} 加载 {len(bot.messages)} 条历史消息。")
+        except FileNotFoundError:
+            print(f"[警告] 历史文件不存在: {args.load}，将开始新对话。",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"[警告] 加载历史失败: {e}，将开始新对话。", file=sys.stderr)
+
     print(f"DeepSeek Chatbot 已启动 [模型: {args.model}]")
     print("输入 /help 查看命令，输入 /exit 退出。\n")
 
@@ -232,26 +336,48 @@ def main():
         try:
             user_input = input(">>> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n再见！")
-            break
+            if args.save_log:
+                try:
+                    bot.save_history(args.save_log)
+                    print(f"\n对话已保存到 {args.save_log}")
+                except Exception as e:
+                    print(f"\n保存失败: {e}", file=sys.stderr)
+                break
+            if ask_save_on_exit(bot):
+                break
+            else:
+                continue
 
         if not user_input:
             continue
 
         # ---- 命令处理 ----
         if user_input in ("/exit", "/quit"):
-            print("再见！")
-            break
+            if args.save_log:
+                try:
+                    bot.save_history(args.save_log)
+                    print(f"对话已保存到 {args.save_log}")
+                except Exception as e:
+                    print(f"保存失败: {e}", file=sys.stderr)
+                break
+            if ask_save_on_exit(bot):
+                break
+            else:
+                continue
+
         elif user_input == "/help":
             print_help()
             continue
+
         elif user_input == "/clear":
             bot.clear_history(args.system)
             print("对话历史已清空。")
             continue
+
         elif user_input == "/history":
             print(f"当前历史消息数: {len(bot.messages)}")
             continue
+
         elif user_input.startswith("/save "):
             path = user_input[6:].strip()
             try:
@@ -260,6 +386,7 @@ def main():
             except Exception as e:
                 print(f"保存失败: {e}", file=sys.stderr)
             continue
+
         elif user_input.startswith("/load "):
             path = user_input[6:].strip()
             try:
@@ -277,14 +404,6 @@ def main():
             bot.chat(user_input)
         except Exception as e:
             print(f"\n[错误] {e}", file=sys.stderr)
-
-    # 退出时自动保存
-    if args.save_log:
-        try:
-            bot.save_history(args.save_log)
-            print(f"对话已保存到 {args.save_log}")
-        except Exception as e:
-            print(f"保存失败: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
