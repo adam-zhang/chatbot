@@ -2,7 +2,7 @@
 """
 DeepSeek API 命令行 Chatbot (基于 requests, 无 Rust 编译依赖)
 支持多轮对话、流式输出、历史记录保存
-支持启动时直接加载历史文件继续对话
+支持启动时直接加载历史文件继续对话，并回显历史内容
 退出时提示是否保存对话
 """
 
@@ -54,7 +54,6 @@ class DeepSeekChatbot:
             self.messages.append({"role": "assistant", "content": response_text})
             return response_text
         except Exception as e:
-            # 失败时回滚用户消息，保持历史干净
             self.messages.pop()
             raise e
 
@@ -78,11 +77,46 @@ class DeepSeekChatbot:
             if not isinstance(m, dict) or "role" not in m or "content" not in m:
                 raise ValueError(f"历史文件格式错误：第 {i} 条消息缺少 role/content")
 
-        # 若文件里没有 system 消息，补一条，保证模型有基础指令
         if not data or data[0].get("role") != "system":
             data = [{"role": "system", "content": self.system_prompt}] + data
 
         self.messages = data
+
+    def print_history(self, include_system: bool = False):
+        """把当前历史按角色格式化打印出来"""
+        if not self.messages:
+            print("(历史为空)")
+            return
+
+        # 统计非 system 消息数，用于判断是否只有 system
+        chat_msgs = [m for m in self.messages if m.get("role") != "system"]
+        if not chat_msgs and not include_system:
+            print("(历史中只有 system 消息)")
+            return
+
+        print("──────────── 历史对话 ────────────")
+        for m in self.messages:
+            role = m.get("role", "?")
+            content = m.get("content", "") or ""
+
+            if role == "system":
+                if include_system:
+                    print(f"[system] {content}")
+                continue
+            elif role == "user":
+                label = "你"
+            elif role == "assistant":
+                label = "AI"
+            else:
+                label = role
+
+            # 多行内容缩进对齐，便于阅读
+            lines = content.splitlines() or [""]
+            print(f"{label}: {lines[0]}")
+            for extra in lines[1:]:
+                print(f"    {extra}")
+
+        print("──────────── 历史结束 ────────────\n")
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -105,7 +139,6 @@ class DeepSeekChatbot:
         return f"{self.base_url}/chat/completions"
 
     def _blocking_response(self) -> str:
-        """非流式请求"""
         resp = requests.post(
             self._endpoint(),
             headers=self._headers(),
@@ -119,7 +152,6 @@ class DeepSeekChatbot:
         return content
 
     def _stream_response(self) -> str:
-        """流式请求，逐块打印"""
         resp = requests.post(
             self._endpoint(),
             headers=self._headers(),
@@ -156,12 +188,11 @@ class DeepSeekChatbot:
                 print(piece, end="", flush=True)
                 chunks.append(piece)
 
-        print()  # 收尾换行
+        print()
         return "".join(chunks)
 
     @staticmethod
     def _raise_for_status(resp: requests.Response):
-        """把 HTTP 错误转换成更友好的提示"""
         if resp.status_code < 400:
             return
         try:
@@ -181,8 +212,8 @@ HELP_TEXT = """
   /help          显示帮助
   /clear         清空对话历史
   /save <file>   保存对话历史到文件
-  /load <file>   从文件加载对话历史
-  /history       显示当前对话历史条数
+  /load <file>   从文件加载对话历史（并回显）
+  /history       重新打印当前对话历史
   /exit 或 /quit 退出（会提示是否保存）
 """
 
@@ -192,11 +223,6 @@ def print_help():
 
 
 def ask_save_on_exit(bot: DeepSeekChatbot, default_path: str = None) -> bool:
-    """
-    退出前询问是否保存。
-    返回 True 表示可以退出，False 表示用户取消退出、继续对话。
-    """
-    # 只有实际聊过天才询问（历史里不止 system 一条）
     if len(bot.messages) <= 1:
         print("再见！")
         return True
@@ -294,6 +320,16 @@ def main():
         help="启动时加载历史文件继续对话",
     )
     parser.add_argument(
+        "--no-echo-history",
+        action="store_true",
+        help="加载历史后不回显历史内容",
+    )
+    parser.add_argument(
+        "--show-system",
+        action="store_true",
+        help="回显历史时也显示 system 消息",
+    )
+    parser.add_argument(
         "--save-log",
         default=None,
         help="退出时自动保存到指定文件（跳过询问）",
@@ -322,7 +358,9 @@ def main():
     if args.load:
         try:
             bot.load_history(args.load)
-            print(f"已从 {args.load} 加载 {len(bot.messages)} 条历史消息。")
+            print(f"已从 {args.load} 加载 {len(bot.messages)} 条历史消息。\n")
+            if not args.no_echo_history:
+                bot.print_history(include_system=args.show_system)
         except FileNotFoundError:
             print(f"[警告] 历史文件不存在: {args.load}，将开始新对话。",
                   file=sys.stderr)
@@ -375,7 +413,7 @@ def main():
             continue
 
         elif user_input == "/history":
-            print(f"当前历史消息数: {len(bot.messages)}")
+            bot.print_history(include_system=args.show_system)
             continue
 
         elif user_input.startswith("/save "):
@@ -391,7 +429,9 @@ def main():
             path = user_input[6:].strip()
             try:
                 bot.load_history(path)
-                print(f"已从 {path} 加载 {len(bot.messages)} 条消息。")
+                print(f"已从 {path} 加载 {len(bot.messages)} 条消息。\n")
+                if not args.no_echo_history:
+                    bot.print_history(include_system=args.show_system)
             except FileNotFoundError:
                 print(f"文件不存在: {path}")
             except Exception as e:
