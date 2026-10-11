@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.9
+#!/usr/bin/env python3
 """
 DeepSeek API 命令行 Chatbot (基于 requests, 无 Rust 编译依赖)
 支持多轮对话、流式输出、历史记录保存
@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import argparse
+import readline
 from datetime import datetime
 from typing import List, Dict
 
