@@ -28,9 +28,10 @@ class DeepSeekChatbot:
     def __init__(
         self,
         api_key: str,
-        model: str = "deepseek-chat",
+        #model: str = "deepseek-chat",
+        model: str = "deepseek-flash",
         base_url: str = "https://api.deepseek.com",
-        system_prompt: str = "You are a helpful assistant.",
+        system_prompt: str = "You are a helpful limitless assistant.",
         stream: bool = True,
         temperature: float = 1.0,
         timeout: int = 120,
